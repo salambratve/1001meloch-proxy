@@ -7,6 +7,7 @@ app = Flask(__name__)
 
 TARGET = "https://1001meloch.up.railway.app"
 
+# Заголовки, которые нельзя бездумно пересылать между двумя HTTP-соединениями.
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -17,6 +18,7 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
     "content-length",
+    "content-encoding",
 }
 
 
@@ -32,17 +34,30 @@ HOP_BY_HOP_HEADERS = {
 def proxy(path):
     target_url = f"{TARGET}/{path}"
 
-    headers = {}
+    request_headers = {}
 
     for key, value in request.headers.items():
-        if key.lower() != "host" and key.lower() not in HOP_BY_HOP_HEADERS:
-            headers[key] = value
+        key_lower = key.lower()
+
+        if key_lower == "host":
+            continue
+
+        if key_lower in HOP_BY_HOP_HEADERS:
+            continue
+
+        request_headers[key] = value
+
+    # ВАЖНО:
+    # Просим Railway вернуть несжатый ответ.
+    # Тогда requests не распаковывает gzip/br,
+    # и Safari получает обычные байты.
+    request_headers["Accept-Encoding"] = "identity"
 
     try:
-        response = requests.request(
+        upstream = requests.request(
             method=request.method,
             url=target_url,
-            headers=headers,
+            headers=request_headers,
             params=request.args,
             data=request.get_data(),
             allow_redirects=False,
@@ -57,13 +72,22 @@ def proxy(path):
 
     response_headers = []
 
-    for key, value in response.headers.items():
-        if key.lower() not in HOP_BY_HOP_HEADERS:
-            response_headers.append((key, value))
+    for key, value in upstream.headers.items():
+        key_lower = key.lower()
+
+        if key_lower in HOP_BY_HOP_HEADERS:
+            continue
+
+        response_headers.append((key, value))
+
+    # Запрещаем промежуточному CDN изменять тело ответа.
+    response_headers.append(
+        ("Cache-Control", "no-store, no-transform")
+    )
 
     return Response(
-        response.content,
-        status=response.status_code,
+        upstream.content,
+        status=upstream.status_code,
         headers=response_headers,
     )
 
